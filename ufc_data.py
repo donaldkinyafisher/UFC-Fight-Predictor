@@ -11,10 +11,15 @@ ufc_dataset_df = pd.read_csv('data/ufc-master.csv')
 my_cols = ['R_odds', 'B_odds', 'R_ev', 'B_ev',
        'r_dec_odds', 'b_dec_odds', 'r_sub_odds',
        'b_sub_odds', 'r_ko_odds', 'b_ko_odds', 'Winner']
-clean_ufc_df = pd.DataFrame(data= ufc_dataset_df, columns=my_cols)
+
+test_cols = ['R_age', 'B_age', 'R_Reach_cms', 'B_Reach_cms', 'B_Height_cms', 'R_Height_cms', 'R_current_win_streak', 'B_current_win_streak', 'R_total_rounds_fought', 'B_total_rounds_fought', 'B_avg_SIG_STR_pct', 'R_avg_SIG_STR_pct', 'B_avg_TD_landed', 'R_avg_TD_landed', 'B_avg_SUB_ATT', 'R_avg_SUB_ATT', 'Winner']
+
+clean_ufc_df = pd.DataFrame(data= ufc_dataset_df, columns=test_cols)
+
+numbersOnly_ufc_df = ufc_dataset_df.select_dtypes(['number'])
 
 #For 1st pass, just drop rows with nan values
-clean_ufc_df = clean_ufc_df.dropna(axis = 'index')
+clean_ufc_df = numbersOnly_ufc_df.dropna(axis = 'index')
 
 #Split training and testing data, replacing  value strings with integers
 X = clean_ufc_df.loc[:, clean_ufc_df.columns != 'Winner']

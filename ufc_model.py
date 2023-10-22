@@ -20,4 +20,4 @@ accuracy = metrics.accuracy_score(y_test, y_pred)
 print(f'test_accuracy:{accuracy}')
 
 #Save model
-model.save_model("UFC_MODEL_XGBOOST_V1.json")
+#model.save_model("UFC_MODEL_XGBOOST_V1.json")
