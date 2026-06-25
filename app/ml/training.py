@@ -1,0 +1,428 @@
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable
+
+import joblib
+import numpy as np
+import pandas as pd
+import torch
+from sklearn.compose import ColumnTransformer
+from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
+from sklearn.model_selection import train_test_split
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from torch import nn
+from torch.utils.data import DataLoader, TensorDataset
+
+
+ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
+DEFAULT_MODEL_PATH = ARTIFACT_DIR / "fight_winner_model.joblib"
+DEFAULT_METRICS_PATH = Path(__file__).resolve().parent / "model_metrics.json"
+
+TARGET_COLUMN = "winner"
+LABEL_MAPPING = {"blue": 0, "red": 1}
+INVERSE_LABEL_MAPPING = {value: key for key, value in LABEL_MAPPING.items()}
+
+NUMERIC_FEATURES = [
+    "red_fighter_height",
+    "red_fighter_reach",
+    "red_fighter_slpm_cs",
+    "red_fighter_str_acc_cs",
+    "red_fighter_sapm_cs",
+    "red_fighter_str_def_cs",
+    "red_fighter_td_avg_cs",
+    "red_fighter_td_acc_cs",
+    "red_fighter_td_def_cs",
+    "red_fighter_sub_avg_cs",
+    "blue_fighter_height",
+    "blue_fighter_reach",
+    "blue_fighter_slpm_cs",
+    "blue_fighter_str_acc_cs",
+    "blue_fighter_sapm_cs",
+    "blue_fighter_str_def_cs",
+    "blue_fighter_td_avg_cs",
+    "blue_fighter_td_acc_cs",
+    "blue_fighter_td_def_cs",
+    "blue_fighter_sub_avg_cs",
+    "weight_class",
+]
+
+CATEGORICAL_FEATURES = [
+    "red_fighter_stance",
+    "blue_fighter_stance",
+    "sex",
+]
+
+
+class FightWinnerNet(nn.Module):
+    def __init__(self, input_dim: int, hidden_dims: tuple[int, ...] = (64, 32), dropout: float = 0.2) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        previous_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(previous_dim, hidden_dim))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout))
+            previous_dim = hidden_dim
+        layers.append(nn.Linear(previous_dim, 1))
+        self.network = nn.Sequential(*layers)
+
+    def forward(self, features: torch.Tensor) -> torch.Tensor:
+        return self.network(features).squeeze(1)
+
+
+@dataclass
+class SavedFightModel:
+    model_name: str
+    preprocessor: ColumnTransformer
+    model: Any
+    feature_columns: list[str]
+    numeric_features: list[str]
+    categorical_features: list[str]
+    metrics: dict[str, Any]
+    label_mapping: dict[str, int]
+    model_config: dict[str, Any]
+
+    def predict_proba(self, fights_df: pd.DataFrame) -> np.ndarray:
+        features = _select_features(fights_df, self.feature_columns)
+        transformed = self.preprocessor.transform(features)
+
+        if self.model_name == "pytorch_mlp":
+            self.model.eval()
+            with torch.no_grad():
+                tensor = torch.tensor(_as_dense_float32(transformed), dtype=torch.float32)
+                red_probs = torch.sigmoid(self.model(tensor)).cpu().numpy()
+        else:
+            red_class_index = list(self.model.classes_).index(self.label_mapping["red"])
+            red_probs = self.model.predict_proba(transformed)[:, red_class_index]
+
+        blue_probs = 1.0 - red_probs
+        return np.column_stack([blue_probs, red_probs])
+
+    def predict(self, fights_df: pd.DataFrame) -> pd.Series:
+        probabilities = self.predict_proba(fights_df)
+        labels = np.where(probabilities[:, 1] >= 0.5, "red", "blue")
+        return pd.Series(labels, index=fights_df.index, name="predicted_winner")
+
+    def save(self, model_path: str | Path = DEFAULT_MODEL_PATH) -> Path:
+        path = Path(model_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        joblib.dump(self, path)
+        return path
+
+
+def load_model(model_path: str | Path = DEFAULT_MODEL_PATH) -> SavedFightModel:
+    return joblib.load(model_path)
+
+
+def train_model(
+    historical_fights_df: pd.DataFrame,
+    model_type: str = "pytorch_mlp",
+    compare_models: list[str] | None = None,
+    model_configs: dict[str, dict[str, Any]] | None = None,
+    model_path: str | Path = DEFAULT_MODEL_PATH,
+    metrics_path: str | Path = DEFAULT_METRICS_PATH,
+    test_size: float = 0.2,
+    random_state: int = 42,
+) -> SavedFightModel:
+    """
+    Train one or more fight-winner classifiers and save the best model plus metrics.
+
+    The default model is a PyTorch MLP. Pass compare_models=["pytorch_mlp",
+    "logistic_regression"] to evaluate multiple registered model types on the
+    same preprocessed train/validation split.
+    """
+    model_configs = model_configs or {}
+    candidate_model_types = compare_models or [model_type]
+    unknown_models = set(candidate_model_types) - set(_MODEL_TRAINERS)
+    if unknown_models:
+        raise ValueError(f"Unknown model type(s): {', '.join(sorted(unknown_models))}")
+
+    prepared = _prepare_training_frame(historical_fights_df)
+    feature_columns = _available_feature_columns(prepared)
+    if not feature_columns:
+        raise ValueError("No usable training features found in historical_fights_df.")
+
+    x = _select_features(prepared, feature_columns)
+    y = prepared[TARGET_COLUMN].map(LABEL_MAPPING).astype(int)
+
+    stratify = y if y.nunique() > 1 else None
+    x_train, x_val, y_train, y_val = train_test_split(
+        x,
+        y,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify,
+    )
+
+    preprocessor = _build_preprocessor(feature_columns)
+    x_train_processed = preprocessor.fit_transform(x_train)
+    x_val_processed = preprocessor.transform(x_val)
+
+    results: list[SavedFightModel] = []
+    for candidate in candidate_model_types:
+        trainer = _MODEL_TRAINERS[candidate]
+        model = trainer(
+            x_train_processed,
+            y_train,
+            x_val_processed,
+            y_val,
+            random_state=random_state,
+            config=model_configs.get(candidate, {}),
+        )
+        metrics = _evaluate_model(candidate, model, x_val_processed, y_val)
+        metrics["model_type"] = candidate
+        metrics["train_rows"] = int(len(x_train))
+        metrics["validation_rows"] = int(len(x_val))
+        metrics["feature_columns"] = feature_columns
+        metrics["compared_models"] = candidate_model_types
+
+        results.append(
+            SavedFightModel(
+                model_name=candidate,
+                preprocessor=preprocessor,
+                model=model,
+                feature_columns=feature_columns,
+                numeric_features=[column for column in NUMERIC_FEATURES if column in feature_columns],
+                categorical_features=[column for column in CATEGORICAL_FEATURES if column in feature_columns],
+                metrics=metrics,
+                label_mapping=LABEL_MAPPING,
+                model_config=model_configs.get(candidate, {}),
+            )
+        )
+
+    best_model = max(results, key=lambda result: (result.metrics["f1_score"], result.metrics["accuracy"]))
+    best_model.metrics["candidate_results"] = {
+        result.model_name: {
+            "accuracy": result.metrics["accuracy"],
+            "precision": result.metrics["precision"],
+            "recall": result.metrics["recall"],
+            "f1_score": result.metrics["f1_score"],
+        }
+        for result in results
+    }
+
+    saved_model_path = best_model.save(model_path)
+    best_model.metrics["model_path"] = str(saved_model_path)
+    _write_metrics(best_model.metrics, metrics_path)
+    return best_model
+
+
+def main(historical_fights_df: pd.DataFrame, **kwargs: Any) -> SavedFightModel:
+    return train_model(historical_fights_df, **kwargs)
+
+
+def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
+    if TARGET_COLUMN not in df.columns:
+        raise ValueError(f"historical_fights_df must include a '{TARGET_COLUMN}' column.")
+
+    prepared = df.copy()
+    prepared[TARGET_COLUMN] = prepared[TARGET_COLUMN].astype(str).str.lower().str.strip()
+    prepared = prepared[prepared[TARGET_COLUMN].isin(LABEL_MAPPING)].copy()
+    if prepared.empty:
+        raise ValueError("No red/blue winner rows found after filtering draws and no-contests.")
+
+    return prepared
+
+
+def _available_feature_columns(df: pd.DataFrame) -> list[str]:
+    return [column for column in NUMERIC_FEATURES + CATEGORICAL_FEATURES if column in df.columns]
+
+
+def _select_features(df: pd.DataFrame, feature_columns: list[str]) -> pd.DataFrame:
+    selected = pd.DataFrame(index=df.index)
+    for column in feature_columns:
+        selected[column] = df[column] if column in df.columns else np.nan
+        if column in NUMERIC_FEATURES:
+            selected[column] = pd.to_numeric(selected[column], errors="coerce")
+    return selected
+
+
+def _build_preprocessor(feature_columns: list[str]) -> ColumnTransformer:
+    numeric_features = [column for column in NUMERIC_FEATURES if column in feature_columns]
+    categorical_features = [column for column in CATEGORICAL_FEATURES if column in feature_columns]
+
+    numeric_pipeline = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="median")),
+            ("scaler", StandardScaler()),
+        ]
+    )
+    categorical_pipeline = Pipeline(
+        steps=[
+            ("imputer", SimpleImputer(strategy="most_frequent")),
+            ("encoder", OneHotEncoder(handle_unknown="ignore")),
+        ]
+    )
+
+    return ColumnTransformer(
+        transformers=[
+            ("numeric", numeric_pipeline, numeric_features),
+            ("categorical", categorical_pipeline, categorical_features),
+        ],
+        remainder="drop",
+    )
+
+
+def _train_pytorch_mlp(
+    x_train: Any,
+    y_train: pd.Series,
+    x_val: Any,
+    y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> FightWinnerNet:
+    torch.manual_seed(random_state)
+    np.random.seed(random_state)
+
+    x_train_array = _as_dense_float32(x_train)
+    y_train_array = y_train.to_numpy(dtype=np.float32)
+    x_val_array = _as_dense_float32(x_val)
+    y_val_array = y_val.to_numpy(dtype=np.float32)
+
+    hidden_dims = tuple(config.get("hidden_dims", (64, 32)))
+    dropout = float(config.get("dropout", 0.2))
+    learning_rate = float(config.get("learning_rate", 0.001))
+    batch_size = int(config.get("batch_size", 64))
+    epochs = int(config.get("epochs", 12))
+    patience = int(config.get("patience", 5))
+
+    model = FightWinnerNet(input_dim=x_train_array.shape[1], hidden_dims=hidden_dims, dropout=dropout)
+    optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
+    loss_fn = nn.BCEWithLogitsLoss()
+    train_loader = DataLoader(
+        TensorDataset(torch.tensor(x_train_array), torch.tensor(y_train_array)),
+        batch_size=batch_size,
+        shuffle=True,
+    )
+
+    best_loss = float("inf")
+    best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+    epochs_without_improvement = 0
+
+    val_features = torch.tensor(x_val_array)
+    val_targets = torch.tensor(y_val_array)
+
+    for _epoch in range(epochs):
+        model.train()
+        for batch_features, batch_targets in train_loader:
+            optimizer.zero_grad()
+            loss = loss_fn(model(batch_features), batch_targets)
+            loss.backward()
+            optimizer.step()
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = loss_fn(model(val_features), val_targets).item()
+
+        if val_loss < best_loss:
+            best_loss = val_loss
+            best_state = {key: value.detach().clone() for key, value in model.state_dict().items()}
+            epochs_without_improvement = 0
+        else:
+            epochs_without_improvement += 1
+
+        if epochs_without_improvement >= patience:
+            break
+
+    model.load_state_dict(best_state)
+    return model
+
+
+def _train_logistic_regression(
+    x_train: Any,
+    y_train: pd.Series,
+    _x_val: Any,
+    _y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> LogisticRegression:
+    model = LogisticRegression(
+        max_iter=int(config.get("max_iter", 1000)),
+        class_weight=config.get("class_weight"),
+        random_state=random_state,
+    )
+    model.fit(x_train, y_train)
+    return model
+
+def _train_transformer_model(
+    x_train: Any,
+    y_train: pd.Series,
+    x_val: Any,
+    y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> Any:
+    """
+    Placeholder for training a transformer-based model.
+    This function should be implemented with the specific transformer architecture and training logic.
+    """
+    raise NotImplementedError("Transformer model training is not yet implemented.")
+
+def _evaluate_model(model_name: str, model: Any, x_val: Any, y_val: pd.Series) -> dict[str, Any]:
+    if model_name == "pytorch_mlp":
+        model.eval()
+        with torch.no_grad():
+            logits = model(torch.tensor(_as_dense_float32(x_val), dtype=torch.float32))
+            probabilities = torch.sigmoid(logits).cpu().numpy()
+        predictions = (probabilities >= 0.5).astype(int)
+    else:
+        predictions = model.predict(x_val)
+
+    precision, recall, f1_score, _support = precision_recall_fscore_support(
+        y_val,
+        predictions,
+        average="binary",
+        pos_label=LABEL_MAPPING["red"],
+        zero_division=0,
+    )
+    report = classification_report(
+        y_val,
+        predictions,
+        target_names=["blue", "red"],
+        zero_division=0,
+        output_dict=True,
+    )
+
+    return {
+        "accuracy": float(accuracy_score(y_val, predictions)),
+        "precision": float(precision),
+        "recall": float(recall),
+        "f1_score": float(f1_score),
+        "classification_report": report,
+    }
+
+
+def _as_dense_float32(features: Any) -> np.ndarray:
+    if hasattr(features, "toarray"):
+        features = features.toarray()
+    return np.asarray(features, dtype=np.float32)
+
+
+def _write_metrics(metrics: dict[str, Any], metrics_path: str | Path) -> None:
+    path = Path(metrics_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as metrics_file:
+        json.dump(metrics, metrics_file, indent=2)
+
+
+_MODEL_TRAINERS: dict[str, Callable[..., Any]] = {
+    "pytorch_mlp": _train_pytorch_mlp,
+    "logistic_regression": _train_logistic_regression,
+    "transformer": _train_transformer_model,
+}
+
+if __name__ == "__main__":
+
+    historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
+    mymodel = train_model(
+        historical_fights_df=historical_fights_df,
+        compare_models=["pytorch_mlp", "logistic_regression"],
+        model_path="app/ml/artifacts/fight_winner_model.joblib",
+        metrics_path="app/ml//model_metrics.json",
+    )
