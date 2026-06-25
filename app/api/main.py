@@ -1,9 +1,14 @@
+import json
+from pathlib import Path
+
+import pandas as pd
 from fastapi import Depends, FastAPI, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.api.serializers import event_to_dict, fighter_to_dict, prediction_to_dict
 from app.core.database import Base, engine, get_db
 from app.ml.predictor import predict_fight
+from app.ml.training import DEFAULT_METRICS_PATH, train_model
 from app.repositories import events as event_repo
 from app.repositories import fighters as fighter_repo
 from app.repositories import predictions as prediction_repo
@@ -62,3 +67,29 @@ def run_prediction(fight_id: int, db: Session = Depends(get_db)):
 @app.get("/predictions")
 def predictions(db: Session = Depends(get_db)):
     return [prediction_to_dict(prediction) for prediction in prediction_repo.list_predictions(db)]
+
+
+@app.post("/predictions/train")
+def train_prediction_model():
+    data_path = Path("app/data/historical_fights.csv")
+    if not data_path.exists():
+        raise HTTPException(status_code=404, detail="Historical fights data not found")
+
+    try:
+        historical_fights_df = pd.read_csv(data_path)
+        saved_model = train_model(historical_fights_df, 
+                                  compare_models=["pytorch_mlp", "logistic_regression"]
+                                  )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Could not train model: {exc}") from exc
+
+    return saved_model.metrics
+
+
+@app.get("/predictions/metrics")
+def prediction_model_metrics():
+    if not DEFAULT_METRICS_PATH.exists():
+        raise HTTPException(status_code=404, detail="Model metrics not found")
+
+    with DEFAULT_METRICS_PATH.open("r", encoding="utf-8") as metrics_file:
+        return json.load(metrics_file)
