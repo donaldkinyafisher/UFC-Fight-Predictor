@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -24,8 +25,15 @@ from torch.utils.data import DataLoader, TensorDataset
 
 
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
-DEFAULT_MODEL_PATH = ARTIFACT_DIR / "fight_winner_model.joblib"
-DEFAULT_METRICS_PATH = Path(__file__).resolve().parent / "model_metrics.json"
+MODELS_DIR = ARTIFACT_DIR / "models"
+DATA_DIR = ARTIFACT_DIR / "data"
+METRICS_DIR = ARTIFACT_DIR / "metrics"
+DATASET_PATH = DATA_DIR / "ufc_split_data.npz"
+DEFAULT_METRICS_PATH = METRICS_DIR/ "model_metrics.json"
+
+MODELS_DIR.mkdir(parents=True, exist_ok=True)
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+METRICS_DIR.mkdir(parents=True, exist_ok=True)
 
 TARGET_COLUMN = "winner"
 LABEL_MAPPING = {"blue": 0, "red": 1}
@@ -87,147 +95,126 @@ class FightWinnerNet(nn.Module):
     def forward(self, features: torch.Tensor) -> torch.Tensor:
         return self.network(features).squeeze(1)
 
+def load_model(model_name: str):
+    return joblib.load(MODELS_DIR / f"{model_name}.joblib")
 
-@dataclass
-class SavedFightModel:
-    model_name: str
-    preprocessor: ColumnTransformer
-    model: Any
-    feature_columns: list[str]
-    numeric_features: list[str]
-    categorical_features: list[str]
-    metrics: dict[str, Any]
-    label_mapping: dict[str, int]
-    model_config: dict[str, Any]
+def load_preprocessed_data() -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, list]:
+    """
 
-    def predict_proba(self, fights_df: pd.DataFrame) -> np.ndarray:
-        features = _select_features(fights_df, self.feature_columns)
-        transformed = self.preprocessor.transform(features)
+    Args:
 
-        if self.model_name == "pytorch_mlp":
-            self.model.eval()
-            with torch.no_grad():
-                tensor = torch.tensor(_as_dense_float32(transformed), dtype=torch.float32)
-                red_probs = torch.sigmoid(self.model(tensor)).cpu().numpy()
-        else:
-            red_class_index = list(self.model.classes_).index(self.label_mapping["red"])
-            red_probs = self.model.predict_proba(transformed)[:, red_class_index]
+    Returns:
+        _type_: _description_
+    """
 
-        blue_probs = 1.0 - red_probs
-        return np.column_stack([blue_probs, red_probs])
+    # 1. Open the archive wrapper
+    data_archive = np.load(DATASET_PATH)
 
-    def predict(self, fights_df: pd.DataFrame) -> pd.Series:
-        probabilities = self.predict_proba(fights_df)
-        labels = np.where(probabilities[:, 1] >= 0.5, "red", "blue")
-        return pd.Series(labels, index=fights_df.index, name="predicted_winner")
+    # 2. Unpack them directly into variables
+    X_train = data_archive['X_train']
+    X_test = data_archive['X_test']
+    y_train = data_archive['y_train']
+    y_test = data_archive['y_test']
+    feature_names = data_archive['feature_names']
 
-    def save(self, model_path: str | Path = DEFAULT_MODEL_PATH) -> Path:
-        path = Path(model_path)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        joblib.dump(self, path)
-        return path
+    # 3. Always close the archive file when finished unpacking
+    data_archive.close()
 
-
-def load_model(model_path: str | Path = DEFAULT_MODEL_PATH) -> SavedFightModel:
-    return joblib.load(model_path)
-
+    return X_train, y_train, X_test, y_test, feature_names
 
 def train_model(
-    historical_fights_df: pd.DataFrame,
-    model_type: str = "pytorch_mlp",
-    compare_models: list[str] | None = None,
+    models: list = ["pytorch_mlp"],
     model_configs: dict[str, dict[str, Any]] | None = None,
-    model_path: str | Path = DEFAULT_MODEL_PATH,
     metrics_path: str | Path = DEFAULT_METRICS_PATH,
     test_size: float = 0.2,
     random_state: int = 42,
-) -> SavedFightModel:
+):
     """
-    Train one or more fight-winner classifiers and save the best model plus metrics.
+    Train one or more fight-winner classifiers. The models are written to disk in the artifacts/models directory, 
+    and their evaluation metrics are written to a JSON file in the artifacts/metrics directory.
+    """
 
-    The default model is a PyTorch MLP. Pass ``compare_models`` (for example,
-    ``DEFAULT_COMPARISON_MODELS``) to evaluate registered models on the same
-    preprocessed train/validation split.
-    """
     model_configs = model_configs or {}
-    candidate_model_types = compare_models or [model_type]
+    candidate_model_types = models
     unknown_models = set(candidate_model_types) - set(_MODEL_TRAINERS)
     if unknown_models:
         raise ValueError(f"Unknown model type(s): {', '.join(sorted(unknown_models))}")
 
-    prepared = _prepare_training_frame(historical_fights_df)
-    feature_columns = _available_feature_columns(prepared)
-    if not feature_columns:
-        raise ValueError("No usable training features found in historical_fights_df.")
+    if not DATASET_PATH.exists():
 
-    x = _select_features(prepared, feature_columns)
-    y = prepared[TARGET_COLUMN].map(LABEL_MAPPING).astype(int)
+        historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
+        prepared = _prepare_training_frame(historical_fights_df)
+        feature_columns = _available_feature_columns(prepared)
+        if not feature_columns:
+            raise ValueError("No usable training features found in historical_fights_df.")
 
-    stratify = y if y.nunique() > 1 else None
-    x_train, x_val, y_train, y_val = train_test_split(
-        x,
-        y,
-        test_size=test_size,
-        random_state=random_state,
-        stratify=stratify,
-    )
+        X = _select_features(prepared, feature_columns)
+        y = prepared[TARGET_COLUMN].map(LABEL_MAPPING).astype(int)
 
-    preprocessor = _build_preprocessor(feature_columns)
-    x_train_processed = preprocessor.fit_transform(x_train)
-    x_val_processed = preprocessor.transform(x_val)
+        stratify = y if y.nunique() > 1 else None
+        X_train, X_test, y_train, y_test = train_test_split(
+            X,
+            y,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=stratify,
+        )
 
-    results: list[SavedFightModel] = []
+        preprocessor = _build_preprocessor(feature_columns)
+        X_train_processed = preprocessor.fit_transform(X_train)
+        X_test_processed = preprocessor.transform(X_test)
+        feature_names = preprocessor.get_feature_names_out().tolist()
+
+        np.savez_compressed(
+            DATASET_PATH, 
+            X_train=_as_dense_float32(X_train_processed),
+            X_test=_as_dense_float32(X_test_processed),
+            y_train=y_train, 
+            y_test=y_test,
+            feature_names = feature_names
+            )
+        
+    else:
+        X_train_processed, y_train, X_test_processed, y_test, _ = load_preprocessed_data()
+        
+    results = {}
     for candidate in candidate_model_types:
         trainer = _MODEL_TRAINERS[candidate]
         model = trainer(
-            x_train_processed,
+            X_train_processed,
             y_train,
-            x_val_processed,
-            y_val,
+            X_test_processed,
+            y_test,
             random_state=random_state,
             config=model_configs.get(candidate, {}),
         )
-        metrics = _evaluate_model(candidate, model, x_val_processed, y_val)
-        metrics["model_type"] = candidate
-        metrics["train_rows"] = int(len(x_train))
-        metrics["validation_rows"] = int(len(x_val))
-        metrics["feature_columns"] = feature_columns
-        metrics["compared_models"] = candidate_model_types
+        joblib.dump(model, MODELS_DIR / f"{candidate}.joblib")
 
-        results.append(
-            SavedFightModel(
-                model_name=candidate,
-                preprocessor=preprocessor,
-                model=model,
-                feature_columns=feature_columns,
-                numeric_features=[column for column in NUMERIC_FEATURES if column in feature_columns],
-                categorical_features=[column for column in CATEGORICAL_FEATURES if column in feature_columns],
-                metrics=metrics,
-                label_mapping=LABEL_MAPPING,
-                model_config=model_configs.get(candidate, {}),
-            )
-        )
+        metrics = _evaluate_model(candidate, model, X_test_processed, y_test)
+        results[candidate] = metrics
+        #metrics["train_rows"] = int(len(X_train))
+        #metrics["validation_rows"] = int(len(X_test))
+        #metrics["feature_columns"] = feature_columns
+        #metrics["compared_models"] = candidate_model_types
 
-    best_model = max(results, key=lambda result: (result.metrics["f1_score"], result.metrics["accuracy"]))
-    best_model.metrics["candidate_results"] = {
-        result.model_name: {
-            "accuracy": result.metrics["accuracy"],
-            "precision": result.metrics["precision"],
-            "recall": result.metrics["recall"],
-            "f1_score": result.metrics["f1_score"],
-        }
-        for result in results
-    }
+        # results.append(
+        #     SavedFightModel(
+        #         model_name=candidate,
+        #         preprocessor=preprocessor,
+        #         model=model,
+        #         feature_columns=feature_columns,
+        #         numeric_features=[column for column in NUMERIC_FEATURES if column in feature_columns],
+        #         categorical_features=[column for column in CATEGORICAL_FEATURES if column in feature_columns],
+        #         metrics=metrics,
+        #         label_mapping=LABEL_MAPPING,
+        #         model_config=model_configs.get(candidate, {}),
+        #     )
+        # )
 
-    saved_model_path = best_model.save(model_path)
-    best_model.metrics["model_path"] = str(saved_model_path)
-    _write_metrics(best_model.metrics, metrics_path)
-    return best_model
+    #Write metrics to file
+    _write_metrics(results, metrics_path)
 
-
-def main(historical_fights_df: pd.DataFrame, **kwargs: Any) -> SavedFightModel:
-    return train_model(historical_fights_df, **kwargs)
-
+    return results
 
 def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     if TARGET_COLUMN not in df.columns:
@@ -293,9 +280,9 @@ def _train_pytorch_mlp(
     np.random.seed(random_state)
 
     x_train_array = _as_dense_float32(x_train)
-    y_train_array = y_train.to_numpy(dtype=np.float32)
+    y_train_array = _as_dense_float32(y_train)
     x_val_array = _as_dense_float32(x_val)
-    y_val_array = y_val.to_numpy(dtype=np.float32)
+    y_val_array = _as_dense_float32(y_val)
 
     hidden_dims = tuple(config.get("hidden_dims", (64, 32)))
     dropout = float(config.get("dropout", 0.2))
@@ -509,9 +496,27 @@ def _as_dense_float32(features: Any) -> np.ndarray:
 
 def _write_metrics(metrics: dict[str, Any], metrics_path: str | Path) -> None:
     path = Path(metrics_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing metrics file if present and valid
+    existing: dict[str, Any] = {}
+    if path.exists():
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except (json.JSONDecodeError, OSError):
+            existing = {}
+
+    # Get all results keys
+    models = list(metrics.keys())
+
+    #Store metrics under top-level keys by model_key
+    for model_key in models:
+        existing[model_key] = metrics[model_key]
+
     with path.open("w", encoding="utf-8") as metrics_file:
-        json.dump(metrics, metrics_file, indent=2)
+        json.dump(existing, metrics_file, indent=2)
+
+    return
 
 
 _MODEL_TRAINERS: dict[str, Callable[..., Any]] = {
@@ -526,10 +531,8 @@ _MODEL_TRAINERS: dict[str, Callable[..., Any]] = {
 
 if __name__ == "__main__":
 
-    historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
-    mymodel = train_model(
-        historical_fights_df=historical_fights_df,
-        compare_models=DEFAULT_COMPARISON_MODELS,
-        model_path="app/ml/artifacts/fight_winner_model.joblib",
-        metrics_path="app/ml//model_metrics.json",
+    #historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
+    results = train_model(
+        models=DEFAULT_COMPARISON_MODELS
     )
+    print("Training completed. Results:\n", results)
