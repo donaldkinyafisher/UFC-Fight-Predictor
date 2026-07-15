@@ -1,0 +1,96 @@
+import streamlit as st
+from utils import load_data, api_post, api_get, load_model_metrics, load_model, load_preprocessed_data
+import pandas as pd
+import requests
+import streamlit as st
+from app.ml.training import DEFAULT_COMPARISON_MODELS, DEFAULT_METRICS_PATH, train_model
+import shap
+from matplotlib import pyplot as plt
+import json
+
+st.title("Train and select model")
+
+historical_fights_df = load_data()
+
+
+#Model metrics - accuracy, precision, recall, f1-score - from model_metrics.json
+
+#Preview data 
+st.subheader("Preview Trainining Data")
+st.dataframe(historical_fights_df.head())
+
+#Display Metrics - reload model_metrics if user presses button to train model
+selected_model_to_train = st.selectbox("Select model to train", options=DEFAULT_COMPARISON_MODELS)
+
+if st.button("Train Model", type="primary") and selected_model_to_train:
+    with st.spinner("Training model..."):
+        try:
+            results = train_model(
+                models=[selected_model_to_train]
+            )
+        except Exception as exc:
+            raise ValueError(f"Could not train model: {exc}")
+        st.success(f"Model trained and metrics saved.")
+        classifcation_report = pd.DataFrame.from_dict(results[selected_model_to_train]['classification_report'])
+        st.table(classifcation_report)
+                                                      
+            
+st.subheader("All Model Metrics")
+try:
+    model_metrics = load_model_metrics()
+except (OSError, json.JSONDecodeError, requests.RequestException) as exc:
+    st.warning(f"Could not load model metrics: {exc}")
+    model_metrics = {}
+
+#Show metrics in a table format
+metrics_df = pd.DataFrame.from_dict(model_metrics, orient="index")
+st.table(metrics_df.drop(columns=["classification_report"], errors="ignore"))
+
+st.subheader("Most Important Features")
+X_train, y_train, X_test, y_test, feature_names = load_preprocessed_data()
+feature_names_simple = [name.split("__")[-1] for name in feature_names]
+
+selected_model_name = st.selectbox("Select Model", options=DEFAULT_COMPARISON_MODELS)
+
+if selected_model_name:
+    model = load_model(selected_model_name)
+    
+
+    explainer = shap.Explainer(model, X_test)
+    shap_values = explainer(X_test)
+
+    #fig, ax = plt.subplots()
+    shap.summary_plot(shap_values, X_test, feature_names=feature_names_simple, show=False)
+    fig = plt.gcf()
+    ax = plt.gca()
+
+    # Transparent background
+    fig.patch.set_alpha(0.0)
+    ax.patch.set_alpha(0.0)
+
+    # White text for axis labels, title, ticks
+    ax.xaxis.label.set_color('white')
+    ax.yaxis.label.set_color('white')
+    ax.title.set_color('white')
+    ax.tick_params(colors='white', which='both')
+
+    # White text for the feature name labels on the y-axis (these are separate text artists)
+    for text in ax.get_yticklabels():
+        text.set_color('white')
+    for text in ax.get_xticklabels():
+        text.set_color('white')
+
+    # SHAP summary_plot also creates a colorbar — its ticks/labels need updating too
+    # It's usually the last axes added to the figure
+    for axis in fig.axes:
+        if axis is not ax:  # this is the colorbar axis
+            axis.patch.set_alpha(0.0)
+            axis.tick_params(colors='white')
+            for text in axis.get_yticklabels():
+                text.set_color('white')
+            if axis.yaxis.label:
+                axis.yaxis.label.set_color('white')
+
+    st.pyplot(fig, transparent=True)
+st.subheader("Hyper-parameter tuning")
+
