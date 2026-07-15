@@ -4,12 +4,11 @@ Streamlit project for collecting UFC fight data, displaying analytics, and stori
 
 ## Setup
 
-Environment is handled through uv package manager.
+Environment is handled through `uv` package manager. 
 
-```
-git clone [repo-name]
+```bash
+git clone <repo-name>
 uv sync
-
 ```
 
 ## Run
@@ -22,18 +21,24 @@ streamlit run main.py
 
 ## Project roadmap
 
-> **Last updated:** 2026-07-15  
+> **Last updated:** 2026-07-15
 
-- [x] ML Model Tuning
-    - [ ] Display Feature Importance
-    - [ ] Hyper-parameter Tuning
-- [ ] Build "Upcoming Fight" predictor
+### Phase 1
+
+- [ ] ML Model Tuning 🟡
+    - [ ] Display Feature Importance 🟡
+    - [ ] Hyper-parameter Tuning 🟡
+- [ ] Build "Upcoming Fight" predictor ⚪
   - [ ] Fetch Fight data for upcoming event
   - [ ] Predict Winner
+- [ ] Deploy Beta on Streamlit Server ⚪
 - [ ] Betting Performance Tracker
     - [ ] Update model to compute odds/probabilites instead of winning.
     - [ ] Scrape betting odds for upcoming event.
     - [ ] Predictor analyzes odds and profitable oppurtunities based on betting odds.
 
+### Phase 2
+- [ ] Expansion for BJJ
+
 ### Legend
-- 🟢 On Track  🟡 At Risk  🔴 Blocked  ⚪ Not Started  ✅ Complete
+-  🟡 In Progress  🔴 Blocked  ⚪ Not Started  ✅ Complete
