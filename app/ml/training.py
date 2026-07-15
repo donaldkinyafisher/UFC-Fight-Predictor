@@ -11,11 +11,14 @@ import pandas as pd
 import torch
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
 from sklearn.model_selection import train_test_split
+from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.svm import SVC
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
@@ -27,6 +30,15 @@ DEFAULT_METRICS_PATH = Path(__file__).resolve().parent / "model_metrics.json"
 TARGET_COLUMN = "winner"
 LABEL_MAPPING = {"blue": 0, "red": 1}
 INVERSE_LABEL_MAPPING = {value: key for key, value in LABEL_MAPPING.items()}
+
+DEFAULT_COMPARISON_MODELS = [
+    "pytorch_mlp",
+    "logistic_regression",
+    "svm",
+    "knn",
+    "random_forest",
+    "xgboost",
+]
 
 NUMERIC_FEATURES = [
     "red_fighter_height",
@@ -133,9 +145,9 @@ def train_model(
     """
     Train one or more fight-winner classifiers and save the best model plus metrics.
 
-    The default model is a PyTorch MLP. Pass compare_models=["pytorch_mlp",
-    "logistic_regression"] to evaluate multiple registered model types on the
-    same preprocessed train/validation split.
+    The default model is a PyTorch MLP. Pass ``compare_models`` (for example,
+    ``DEFAULT_COMPARISON_MODELS``) to evaluate registered models on the same
+    preprocessed train/validation split.
     """
     model_configs = model_configs or {}
     candidate_model_types = compare_models or [model_type]
@@ -350,6 +362,97 @@ def _train_logistic_regression(
     model.fit(x_train, y_train)
     return model
 
+
+def _train_svm(
+    x_train: Any,
+    y_train: pd.Series,
+    _x_val: Any,
+    _y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> SVC:
+    model = SVC(
+        C=float(config.get("C", 1.0)),
+        kernel=config.get("kernel", "rbf"),
+        gamma=config.get("gamma", "scale"),
+        class_weight=config.get("class_weight"),
+        probability=True,
+        random_state=random_state,
+    )
+    model.fit(x_train, y_train)
+    return model
+
+
+def _train_knn(
+    x_train: Any,
+    y_train: pd.Series,
+    _x_val: Any,
+    _y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> KNeighborsClassifier:
+    # Retained for a consistent trainer interface; KNN itself is deterministic.
+    _ = random_state
+    model = KNeighborsClassifier(
+        n_neighbors=int(config.get("n_neighbors", 15)),
+        weights=config.get("weights", "distance"),
+        p=int(config.get("p", 2)),
+        n_jobs=int(config.get("n_jobs", -1)),
+    )
+    model.fit(x_train, y_train)
+    return model
+
+
+def _train_random_forest(
+    x_train: Any,
+    y_train: pd.Series,
+    _x_val: Any,
+    _y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> RandomForestClassifier:
+    model = RandomForestClassifier(
+        n_estimators=int(config.get("n_estimators", 300)),
+        max_depth=config.get("max_depth"),
+        min_samples_leaf=int(config.get("min_samples_leaf", 1)),
+        class_weight=config.get("class_weight"),
+        n_jobs=int(config.get("n_jobs", -1)),
+        random_state=random_state,
+    )
+    model.fit(x_train, y_train)
+    return model
+
+
+def _train_xgboost(
+    x_train: Any,
+    y_train: pd.Series,
+    _x_val: Any,
+    _y_val: pd.Series,
+    random_state: int,
+    config: dict[str, Any],
+) -> Any:
+    try:
+        from xgboost import XGBClassifier
+    except ImportError as exc:
+        raise ImportError(
+            "XGBoost is required to train model_type='xgboost'. "
+            "Install project dependencies with `pip install -r requirements.txt`."
+        ) from exc
+
+    model = XGBClassifier(
+        n_estimators=int(config.get("n_estimators", 300)),
+        max_depth=int(config.get("max_depth", 4)),
+        learning_rate=float(config.get("learning_rate", 0.05)),
+        subsample=float(config.get("subsample", 0.8)),
+        colsample_bytree=float(config.get("colsample_bytree", 0.8)),
+        objective="binary:logistic",
+        eval_metric="logloss",
+        n_jobs=int(config.get("n_jobs", -1)),
+        random_state=random_state,
+    )
+    model.fit(x_train, y_train)
+    return model
+
 def _train_transformer_model(
     x_train: Any,
     y_train: pd.Series,
@@ -414,6 +517,10 @@ def _write_metrics(metrics: dict[str, Any], metrics_path: str | Path) -> None:
 _MODEL_TRAINERS: dict[str, Callable[..., Any]] = {
     "pytorch_mlp": _train_pytorch_mlp,
     "logistic_regression": _train_logistic_regression,
+    "svm": _train_svm,
+    "knn": _train_knn,
+    "random_forest": _train_random_forest,
+    "xgboost": _train_xgboost,
     "transformer": _train_transformer_model,
 }
 
@@ -422,7 +529,7 @@ if __name__ == "__main__":
     historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
     mymodel = train_model(
         historical_fights_df=historical_fights_df,
-        compare_models=["pytorch_mlp", "logistic_regression"],
+        compare_models=DEFAULT_COMPARISON_MODELS,
         model_path="app/ml/artifacts/fight_winner_model.joblib",
         metrics_path="app/ml//model_metrics.json",
     )
