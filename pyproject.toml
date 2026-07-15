@@ -1,0 +1,23 @@
+[project]
+name = "ufc-analytics-project"
+version = "0.1.0"
+description = "A Streamlit web application for UFC analytics, providing insights, visualizations and predictions based on fight data."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4==4.12.3",
+    "fastapi==0.115.6",
+    "joblib==1.5.3",
+    "numpy==2.2.0",
+    "pandas==2.2.3",
+    "plotly==5.24.1",
+    "pydantic-settings==2.7.1",
+    "requests==2.32.3",
+    "scikit-learn==1.5.2",
+    "shap>=0.51.0",
+    "sqlalchemy==2.0.36",
+    "streamlit==1.41.1",
+    "torch==2.5.1",
+    "uvicorn[standard]==0.34.0",
+    "xgboost==2.1.4",
+]

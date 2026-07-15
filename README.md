@@ -1,58 +1,39 @@
 # UFC Data Analytics Dashboard
 
-Streamlit + FastAPI project for collecting UFC fight data, displaying analytics, and storing feature-ready records for prediction models.
-
-## Stack
-
-- Python
-- FastAPI API and scraper service
-- Streamlit front-end
-- SQL database through SQLAlchemy
-- SQLite by default, configurable with `DATABASE_URL`
+Streamlit project for collecting UFC fight data, displaying analytics, and storing feature-ready records for prediction models.
 
 ## Setup
 
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+Environment is handled through uv package manager.
+
+```
+git clone [repo-name]
+uv sync
+
 ```
 
 ## Run
 
-Start the API:
+Start the dashboard in the terminal:
 
 ```bash
-uvicorn app.api.main:app --reload
+streamlit run main.py
 ```
 
-Start the dashboard in another terminal:
+## Project roadmap
 
-```bash
-streamlit run streamlit_app.py
-```
+> **Last updated:** 2026-07-15  
 
-## Useful API Routes
+- [x] ML Model Tuning
+    - [ ] Display Feature Importance
+    - [ ] Hyper-parameter Tuning
+- [ ] Build "Upcoming Fight" predictor
+  - [ ] Fetch Fight data for upcoming event
+  - [ ] Predict Winner
+- [ ] Betting Performance Tracker
+    - [ ] Update model to compute odds/probabilites instead of winning.
+    - [ ] Scrape betting odds for upcoming event.
+    - [ ] Predictor analyzes odds and profitable oppurtunities based on betting odds.
 
-- `GET /health`
-- `POST /scrape/upcoming` - scrape and store upcoming events/fights
-- `GET /events/upcoming`
-- `GET /fighters`
-- `POST /predictions/run?fight_id=1`
-- `GET /predictions`
-
-## Configuration
-
-Create a `.env` file when you want to override defaults:
-
-```bash
-DATABASE_URL=sqlite:///./ufc_analytics.db
-UFC_STATS_BASE_URL=http://ufcstats.com
-```
-
-For Postgres later:
-
-```bash
-DATABASE_URL=postgresql+psycopg2://user:password@localhost:5432/ufc_analytics
-```
-
+### Legend
+- 🟢 On Track  🟡 At Risk  🔴 Blocked  ⚪ Not Started  ✅ Complete

@@ -11,3 +11,4 @@ SQLAlchemy==2.0.36
 streamlit==1.41.1
 torch==2.5.1
 uvicorn[standard]==0.34.0
+xgboost==2.1.4
