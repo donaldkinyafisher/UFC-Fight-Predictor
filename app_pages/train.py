@@ -1,5 +1,5 @@
 import streamlit as st
-from utils import load_data, api_post, api_get, load_model_metrics, load_model, load_preprocessed_data
+from app.utils import load_data, api_post, api_get, load_model_metrics, load_model, load_preprocessed_data
 import pandas as pd
 import requests
 import streamlit as st
@@ -8,34 +8,43 @@ import shap
 from matplotlib import pyplot as plt
 import json
 
-st.title("Train and select model")
+#st.title("Train and select model")
 
 historical_fights_df = load_data()
-
-
-#Model metrics - accuracy, precision, recall, f1-score - from model_metrics.json
 
 #Preview data 
 st.subheader("Preview Trainining Data")
 st.dataframe(historical_fights_df.head())
 
-#Display Metrics - reload model_metrics if user presses button to train model
-selected_model_to_train = st.selectbox("Select model to train", options=DEFAULT_COMPARISON_MODELS)
+#Train model
+st.subheader("Train Model")
 
-if st.button("Train Model", type="primary") and selected_model_to_train:
+#Display Metrics - reload model_metrics if user presses button to train model
+selected_model_to_train = st.multiselect("Select model to train", options=['All'] + DEFAULT_COMPARISON_MODELS)
+if selected_model_to_train and 'All' in selected_model_to_train:
+    selected_model_to_train = DEFAULT_COMPARISON_MODELS
+
+#Tune Hyper-paramaters
+tune_hyperparameters = st.checkbox("Tune Hyper-parameters")
+st.warning(" Hyper-parameter tuning is currently not availbale for the Pytorch MLP model. Tuning may take a long time depending on the model and the number of trials.")
+tune = True if tune_hyperparameters else False
+
+if st.button("Train", type="primary") and selected_model_to_train:
     with st.spinner("Training model..."):
         try:
             results = train_model(
-                models=[selected_model_to_train]
+                models=selected_model_to_train,
+                tune = tune
             )
         except Exception as exc:
             raise ValueError(f"Could not train model: {exc}")
         st.success(f"Model trained and metrics saved.")
-        classifcation_report = pd.DataFrame.from_dict(results[selected_model_to_train]['classification_report'])
-        st.table(classifcation_report)
+        for m in selected_model_to_train:
+            st.write(f"Classification report for {m}")
+            classifcation_report = pd.DataFrame.from_dict(results[m]['classification_report'])
+            st.table(classifcation_report)
                                                       
-            
-st.subheader("All Model Metrics")
+st.subheader("Model Metrics")
 try:
     model_metrics = load_model_metrics()
 except (OSError, json.JSONDecodeError, requests.RequestException) as exc:
@@ -46,13 +55,14 @@ except (OSError, json.JSONDecodeError, requests.RequestException) as exc:
 metrics_df = pd.DataFrame.from_dict(model_metrics, orient="index")
 st.table(metrics_df.drop(columns=["classification_report"], errors="ignore"))
 
-st.subheader("Most Important Features")
+### -----------------
+
+st.subheader("View Feature Importance")
+selected_model_name = st.selectbox("Select Model", options=DEFAULT_COMPARISON_MODELS)
 X_train, y_train, X_test, y_test, feature_names = load_preprocessed_data()
 feature_names_simple = [name.split("__")[-1] for name in feature_names]
-
-selected_model_name = st.selectbox("Select Model", options=DEFAULT_COMPARISON_MODELS)
-
 if selected_model_name:
+
     model = load_model(selected_model_name)
     
 
@@ -92,5 +102,3 @@ if selected_model_name:
                 axis.yaxis.label.set_color('white')
 
     st.pyplot(fig, transparent=True)
-st.subheader("Hyper-parameter tuning")
-

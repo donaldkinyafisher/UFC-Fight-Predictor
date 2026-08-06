@@ -1,5 +1,5 @@
 import streamlit as st
-from utils import api_post, api_get
+from app.utils import api_post, api_get
 import requests
 import pandas as pd
 from app.ml.training import DEFAULT_COMPARISON_MODELS

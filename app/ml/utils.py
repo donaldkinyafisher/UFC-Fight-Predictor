@@ -8,7 +8,7 @@ import requests
 import joblib
 
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
-ARTIFACT_DIR = Path(__file__).resolve().parent / "app" /"ml"/ "artifacts"
+ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 MODEL_METRICS_PATH = ARTIFACT_DIR / "metrics" / "model_metrics.json"
 MODELS_DIR = ARTIFACT_DIR / "models"
 DATA_DIR = ARTIFACT_DIR / "data"
@@ -17,7 +17,7 @@ DATASET_PATH = DATA_DIR / "ufc_split_data.npz"
 @st.cache_data
 def load_data():
     try:
-        df = pd.read_csv("app/data/historical_fights.csv")
+        df = pd.read_csv("data/historical_fights.csv")
     except FileNotFoundError:
         st.error("Historical fights data not found. Run the import_ufcdata.py script to fetch the data.")
         st.stop()
