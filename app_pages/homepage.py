@@ -2,7 +2,8 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
-from utils import load_data, api_get
+from app.utils import load_data, api_get
+import json 
 
 st.set_page_config(page_title="UFC Analytics", layout="wide")
 
@@ -32,43 +33,36 @@ def flatten_fights(events: list[dict]) -> pd.DataFrame:
             )
     return pd.DataFrame(rows)
 
-
-fights_df = pd.DataFrame()
+events_df = pd.read_csv("app/data/upcoming_events.csv")
+scheduled_fights_df = pd.read_csv("app/data/scheduled_fights.csv")
 historical_fights_df = load_data()
+with open("app/data/fighters.json", "r") as f:
+    fighters_data = json.load(f)
     
 st.title("UFC Data Analytics")
 
 metric_cols = st.columns(4)
-metric_cols[0].metric("Upcoming Events", len(fights_df))
-metric_cols[1].metric("Scheduled Fights", len(fights_df))
-metric_cols[2].metric("Tracked Fighters", len(set(fights_df.get("red_fighter", [])) | set(fights_df.get("blue_fighter", []))) if not fights_df.empty else 0)
-metric_cols[3].metric("Weight Classes", fights_df["weight_class"].nunique() if not fights_df.empty else 0)
+metric_cols[0].metric("Upcoming Events", len(events_df))
+metric_cols[1].metric("Scheduled Fights", len(scheduled_fights_df))
+metric_cols[2].metric("Tracked Fighters", len(fighters_data))
 
-if fights_df.empty:
-    st.info("No Upcoming fights stored yet. Use Sync Upcoming Fights in the sidebar.")
+if scheduled_fights_df.empty:
+    st.info("No Scheduled fights stored yet. Use Sync Scheduled Fights in the sidebar.")
 else:
-    left, right = st.columns([2, 1])
-    with left:
-        st.subheader("Upcoming Fight Cards")
-        st.dataframe(
-            fights_df[
-                [
-                    "date",
-                    "event",
-                    "red_fighter",
-                    "blue_fighter",
-                    "weight_class",
-                    "red_record",
-                    "blue_record",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-        )
-    with right:
-        counts = fights_df.groupby("weight_class", dropna=False).size().reset_index(name="fights")
-        fig = px.bar(counts, x="fights", y="weight_class", orientation="h", title="Fights by Weight Class")
-        st.plotly_chart(fig, use_container_width=True)
+    st.subheader("Upcoming Fights")
+    st.dataframe(
+        scheduled_fights_df[
+            [
+                "event_date",
+                "event_name",
+                "red_fighter_name",
+                "blue_fighter_name",
+                "bout_type"
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
 
 st.subheader("ML Training Data Statistics")
 ml_data_cols = st.columns(2)
