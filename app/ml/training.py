@@ -1,28 +1,28 @@
 from __future__ import annotations
 
 import json
-import os
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
-
 import joblib
 import numpy as np
 import pandas as pd
+import optuna
+from .config import SEARCH_SPACES
 import torch
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, classification_report, precision_recall_fscore_support
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import cross_val_score, train_test_split, KFold
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.svm import SVC
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
-
+from xgboost import XGBClassifier
+from .utils import load_preprocessed_data, load_data
 
 ARTIFACT_DIR = Path(__file__).resolve().parent / "artifacts"
 MODELS_DIR = ARTIFACT_DIR / "models"
@@ -98,36 +98,13 @@ class FightWinnerNet(nn.Module):
 def load_model(model_name: str):
     return joblib.load(MODELS_DIR / f"{model_name}.joblib")
 
-def load_preprocessed_data() -> tuple[pd.DataFrame, pd.Series, pd.DataFrame, pd.Series, list]:
-    """
-
-    Args:
-
-    Returns:
-        _type_: _description_
-    """
-
-    # 1. Open the archive wrapper
-    data_archive = np.load(DATASET_PATH)
-
-    # 2. Unpack them directly into variables
-    X_train = data_archive['X_train']
-    X_test = data_archive['X_test']
-    y_train = data_archive['y_train']
-    y_test = data_archive['y_test']
-    feature_names = data_archive['feature_names']
-
-    # 3. Always close the archive file when finished unpacking
-    data_archive.close()
-
-    return X_train, y_train, X_test, y_test, feature_names
-
 def train_model(
     models: list = ["pytorch_mlp"],
     model_configs: dict[str, dict[str, Any]] | None = None,
     metrics_path: str | Path = DEFAULT_METRICS_PATH,
     test_size: float = 0.2,
     random_state: int = 42,
+    tune:bool = False
 ):
     """
     Train one or more fight-winner classifiers. The models are written to disk in the artifacts/models directory, 
@@ -142,7 +119,7 @@ def train_model(
 
     if not DATASET_PATH.exists():
 
-        historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
+        historical_fights_df = load_data()
         prepared = _prepare_training_frame(historical_fights_df)
         feature_columns = _available_feature_columns(prepared)
         if not feature_columns:
@@ -179,6 +156,19 @@ def train_model(
         
     results = {}
     for candidate in candidate_model_types:
+        if tune and candidate not in ['pytorch_mlp']:
+            best_params, best_score = _tune_model(
+                candidate,
+                X_train_processed,
+                y_train,
+                X_test_processed,
+                y_test,
+                random_state=random_state,
+            )
+            model_configs[candidate] = best_params
+            #print(f"Best hyperparameters for {candidate}: {best_params}")
+            print(f"Best cross-validation score for {candidate}: {best_score:.4f}")
+
         trainer = _MODEL_TRAINERS[candidate]
         model = trainer(
             X_train_processed,
@@ -192,29 +182,38 @@ def train_model(
 
         metrics = _evaluate_model(candidate, model, X_test_processed, y_test)
         results[candidate] = metrics
-        #metrics["train_rows"] = int(len(X_train))
-        #metrics["validation_rows"] = int(len(X_test))
-        #metrics["feature_columns"] = feature_columns
-        #metrics["compared_models"] = candidate_model_types
-
-        # results.append(
-        #     SavedFightModel(
-        #         model_name=candidate,
-        #         preprocessor=preprocessor,
-        #         model=model,
-        #         feature_columns=feature_columns,
-        #         numeric_features=[column for column in NUMERIC_FEATURES if column in feature_columns],
-        #         categorical_features=[column for column in CATEGORICAL_FEATURES if column in feature_columns],
-        #         metrics=metrics,
-        #         label_mapping=LABEL_MAPPING,
-        #         model_config=model_configs.get(candidate, {}),
-        #     )
-        # )
 
     #Write metrics to file
     _write_metrics(results, metrics_path)
 
     return results
+
+def _tune_model(
+    model_name: str,
+    x_train, y_train, x_val, y_val,
+    random_state: int,
+    n_trials: int = 5,
+) -> tuple[dict[str, Any], float]:
+    trainer = _MODEL_TRAINERS[model_name]
+    space_fn = SEARCH_SPACES[model_name]
+
+    def objective(trial: optuna.Trial) -> float:
+        config = space_fn(trial)
+        model = trainer(x_train, y_train, x_val, y_val, random_state=random_state, config=config, tune=True)
+
+        #Configure k-Fold splitter
+        skfold = KFold(n_splits=5, shuffle=True, random_state=0)
+        scores = cross_val_score(model, x_train, y_train, cv=skfold, scoring='f1_weighted', n_jobs=1)
+
+        return float(np.mean(scores))  # or accuracy — pick your target metric
+
+    sampler = optuna.samplers.TPESampler(seed=random_state)
+    pruner = optuna.pruners.MedianPruner(n_warmup_steps=5)
+    study = optuna.create_study( sampler=sampler, pruner=pruner, study_name = model_name, direction="maximize",)
+    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    print(f"\n---{model_name} Optimization Complete ---")
+
+    return study.best_trial.params, study.best_value
 
 def _prepare_training_frame(df: pd.DataFrame) -> pd.DataFrame:
     if TARGET_COLUMN not in df.columns:
@@ -275,6 +274,7 @@ def _train_pytorch_mlp(
     y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False
 ) -> FightWinnerNet:
     torch.manual_seed(random_state)
     np.random.seed(random_state)
@@ -340,13 +340,15 @@ def _train_logistic_regression(
     _y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False
 ) -> LogisticRegression:
     model = LogisticRegression(
         max_iter=int(config.get("max_iter", 1000)),
         class_weight=config.get("class_weight"),
         random_state=random_state,
     )
-    model.fit(x_train, y_train)
+    if not tune:
+        model.fit(x_train, y_train)
     return model
 
 
@@ -357,16 +359,18 @@ def _train_svm(
     _y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False
 ) -> SVC:
     model = SVC(
         C=float(config.get("C", 1.0)),
         kernel=config.get("kernel", "rbf"),
         gamma=config.get("gamma", "scale"),
         class_weight=config.get("class_weight"),
-        probability=True,
+        probability=False,
         random_state=random_state,
     )
-    model.fit(x_train, y_train)
+    if not tune:
+        model.fit(x_train, y_train)
     return model
 
 
@@ -377,6 +381,7 @@ def _train_knn(
     _y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False,
 ) -> KNeighborsClassifier:
     # Retained for a consistent trainer interface; KNN itself is deterministic.
     _ = random_state
@@ -386,7 +391,8 @@ def _train_knn(
         p=int(config.get("p", 2)),
         n_jobs=int(config.get("n_jobs", -1)),
     )
-    model.fit(x_train, y_train)
+    if not tune:
+        model.fit(x_train, y_train)
     return model
 
 
@@ -397,6 +403,7 @@ def _train_random_forest(
     _y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False,
 ) -> RandomForestClassifier:
     model = RandomForestClassifier(
         n_estimators=int(config.get("n_estimators", 300)),
@@ -406,7 +413,8 @@ def _train_random_forest(
         n_jobs=int(config.get("n_jobs", -1)),
         random_state=random_state,
     )
-    model.fit(x_train, y_train)
+    if not tune:
+        model.fit(x_train, y_train)
     return model
 
 
@@ -417,14 +425,9 @@ def _train_xgboost(
     _y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False,
 ) -> Any:
-    try:
-        from xgboost import XGBClassifier
-    except ImportError as exc:
-        raise ImportError(
-            "XGBoost is required to train model_type='xgboost'. "
-            "Install project dependencies with `pip install -r requirements.txt`."
-        ) from exc
+    
 
     model = XGBClassifier(
         n_estimators=int(config.get("n_estimators", 300)),
@@ -434,10 +437,12 @@ def _train_xgboost(
         colsample_bytree=float(config.get("colsample_bytree", 0.8)),
         objective="binary:logistic",
         eval_metric="logloss",
-        n_jobs=int(config.get("n_jobs", -1)),
+        n_jobs=1,
         random_state=random_state,
     )
-    model.fit(x_train, y_train)
+    if not tune:
+        model.fit(x_train, y_train)
+
     return model
 
 def _train_transformer_model(
@@ -447,6 +452,7 @@ def _train_transformer_model(
     y_val: pd.Series,
     random_state: int,
     config: dict[str, Any],
+    tune: bool = False
 ) -> Any:
     """
     Placeholder for training a transformer-based model.
@@ -533,6 +539,7 @@ if __name__ == "__main__":
 
     #historical_fights_df = pd.read_csv("app/data/historical_fights.csv")
     results = train_model(
-        models=DEFAULT_COMPARISON_MODELS
+        models=["svm", "knn", "xgboost"],
+        tune=True
     )
-    print("Training completed. Results:\n", results)
+    #print("Training completed. Results:\n", results)
