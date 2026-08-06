@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
-from utils import load_data
+from app.utils import load_data
 
 
 
