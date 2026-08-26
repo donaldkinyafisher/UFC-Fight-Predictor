@@ -1,2 +1,0 @@
-"""Database persistence helpers."""
-

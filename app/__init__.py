@@ -1,2 +1,0 @@
-"""UFC analytics application package."""
-
